@@ -4,6 +4,7 @@ import (
 	"flag"
 	"log"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/qiangxue/fasthttp-routing"
@@ -12,11 +13,11 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-var cost int
+var defaultCost int
 
 func main() {
 	bind := flag.String("bind", ":8881", "address to bind baas (can be a unix domain socket: /var/run/baas.sock)")
-	flag.IntVar(&cost, "cost", 10, "bcrypt salt cost")
+	flag.IntVar(&defaultCost, "cost", 10, "bcrypt salt cost")
 	threads := flag.Int("threads", runtime.NumCPU(), "max process (default: cpu count)")
 
 	iniflags.Parse()
@@ -37,7 +38,7 @@ func main() {
 func startServer(bind string, handler func(ctx *fasthttp.RequestCtx)) error {
 	server := &fasthttp.Server{
 		Handler: handler,
-		Name:    "valencia",
+		Name:    "go-baas",
 	}
 	if strings.HasPrefix(bind, "/") {
 		return server.ListenAndServeUNIX(bind, 0777)
@@ -50,6 +51,19 @@ func handleHash(c *routing.Context) error {
 	raw := c.QueryArgs().Peek("raw")
 	if raw == nil {
 		c.Error("Invalid request", 400)
+		return nil
+	}
+	cost := defaultCost
+	if costArg := c.QueryArgs().Peek("cost"); costArg != nil {
+		parsed, err := strconv.Atoi(string(costArg))
+		if err != nil {
+			c.Error("Invalid request", 400)
+			return nil
+		}
+		cost = parsed
+	}
+	if cost > 15 || cost < 2 {
+		c.Error("Invalid cost. It must be in range (2, 15)", 400)
 		return nil
 	}
 	hash, err := bcrypt.GenerateFromPassword(raw, cost)
