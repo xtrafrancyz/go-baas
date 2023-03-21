@@ -3,12 +3,12 @@ package main
 import (
 	"flag"
 	"log"
+	"net"
+	"net/http"
 	"runtime"
 	"strconv"
 	"strings"
 
-	"github.com/fasthttp/router"
-	"github.com/valyala/fasthttp"
 	"github.com/vharitonsky/iniflags"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -24,67 +24,85 @@ func main() {
 
 	runtime.GOMAXPROCS(*threads)
 
-	r := router.New()
-	r.GET("/hash", handleHash)
-	r.GET("/verify", handleVerify)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/hash", handleHash)
+	mux.HandleFunc("/verify", handleVerify)
 
 	log.Printf("Start http server on %s", *bind)
-	err := startServer(*bind, r.Handler)
+	var err error
+	if strings.HasPrefix(*bind, "/") {
+		unixListener, err := net.Listen("unix", *bind)
+		if err == nil {
+			err = http.Serve(unixListener, mux)
+		}
+	} else {
+		err = http.ListenAndServe(*bind, mux)
+	}
 	if err != nil {
 		log.Fatalf("Could not start server: %s", err)
 	}
 }
 
-func startServer(bind string, handler func(ctx *fasthttp.RequestCtx)) error {
-	server := &fasthttp.Server{
-		Handler: handler,
-		Name:    "go-baas",
-	}
-	if strings.HasPrefix(bind, "/") {
-		return server.ListenAndServeUNIX(bind, 0777)
-	} else {
-		return server.ListenAndServe(bind)
-	}
-}
-
-func handleHash(ctx *fasthttp.RequestCtx) {
-	raw := ctx.QueryArgs().Peek("raw")
-	if raw == nil {
-		ctx.Error("Invalid request", 400)
+func handleHash(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" && r.Method != "GET" {
+		http.Error(w, "Method Not Allowed", 405)
 		return
 	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "Invalid request", 400)
+		return
+	}
+
 	cost := defaultCost
-	if costArg := ctx.QueryArgs().Peek("cost"); costArg != nil {
-		parsed, err := strconv.Atoi(string(costArg))
+	raw := r.Form.Get("raw")
+	if r.Form.Has("cost") {
+		cost0, err := strconv.Atoi(r.Form.Get("cost"))
 		if err != nil {
-			ctx.Error("Invalid request", 400)
+			http.Error(w, "Invalid cost", 400)
 			return
 		}
-		cost = parsed
+		cost = cost0
 	}
-	if cost > 15 || cost < 2 {
-		ctx.Error("Invalid cost. It must be in range (2, 15)", 400)
+	if raw == "" {
+		http.Error(w, "Missing raw password", 400)
 		return
 	}
-	hash, err := bcrypt.GenerateFromPassword(raw, cost)
+	if cost > 16 || cost < 5 {
+		http.Error(w, "Invalid cost. It must be in range (5, 16)", 400)
+		return
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(raw), cost)
 	if err != nil {
-		ctx.Error("Could not hash password:"+err.Error(), 500)
+		http.Error(w, "Could not hash password:"+err.Error(), 500)
 		return
 	}
-	_, _ = ctx.Write(hash)
+	w.WriteHeader(200)
+	_, _ = w.Write(hash)
 }
 
-func handleVerify(ctx *fasthttp.RequestCtx) {
-	raw := ctx.QueryArgs().Peek("raw")
-	hash := ctx.QueryArgs().Peek("hash")
-	if raw == nil || hash == nil {
-		ctx.Error("Invalid request", 400)
+func handleVerify(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" && r.Method != "GET" {
+		http.Error(w, "Method Not Allowed", 405)
 		return
 	}
-	err := bcrypt.CompareHashAndPassword(hash, raw)
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "Invalid request", 400)
+		return
+	}
+
+	raw := r.Form.Get("raw")
+	hash := r.Form.Get("hash")
+	if raw == "" || hash == "" {
+		http.Error(w, "Invalid request", 400)
+		return
+	}
+
+	err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(raw))
+	w.WriteHeader(200)
 	if err == nil {
-		_, _ = ctx.WriteString("OK")
+		_, _ = w.Write([]byte("OK"))
 	} else {
-		_, _ = ctx.WriteString("FAIL")
+		_, _ = w.Write([]byte("FAIL"))
 	}
 }
